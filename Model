@@ -1,0 +1,16 @@
+#For using U-Net properly, as it seen below in the architecture, it is always used two convolutions one another after.
+#That's why we will create the class DoubleConv for double convolution.
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConv, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),    #Kernel size 3, stride to 1, padding size of 1 which helps to obtain same convolution.
+            nn.BatchNorm2d(out_channels),                                 #input height and width will be same after convolution.
+            nn.ReLU(inplace=True),                                          
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1, bias=False),   #We will copy-paste the first convolution with only difference that
+            nn.BatchNorm2d(out_channels),                                 #changing in_channels, out_channels to out_channels, out_channels
+            nn.ReLU(inplace=True),                                        #For second convolution. And we had bias=False because
+        )                                                                 #we will use Batch Normalization.
+
+    def forward(self, x):
+        return self.conv(x)
