@@ -1,0 +1,41 @@
+#Dataset of the project has been uploaded to my Google Drive
+#That's why we need to import Google Drive implementation to the code.
+from google.colab import drive
+drive.mount('/content/drive')
+
+#Rasterio is the main library that we need to use, to process real-life
+#coordinated .tiff images from the SpaceNet v2 dataset and match them with 
+#geoJson files which are polygons that are the real-life vectors 
+#with real coordinates
+!pip install rioxarray
+import rioxarray
+import json
+
+import os
+import torch
+import torch.nn as nn
+import torchvision
+import torchvision.transforms.functional as TF
+import torch.optim as optim
+from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
+
+#Python Image Library has been used due to Image import function
+from PIL import Image
+
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
+import math
+!pip uninstall opencv-python-headless
+!pip install opencv-python-headless==4.1.2.30
+from skimage import io
+
+#For raster transformations, rather than using torchvision.transform
+#albumentations has been used due to the fact that working better
+#with geotiff images.
+!pip install -U albumentations
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from tqdm import tqdm
