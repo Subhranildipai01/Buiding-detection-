@@ -1,3 +1,6 @@
+
+##Library Import
+
 #Dataset of the project has been uploaded to my Google Drive
 #That's why we need to import Google Drive implementation to the code.
 from google.colab import drive
@@ -39,3 +42,487 @@ from skimage import io
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from tqdm import tqdm
+
+
+
+
+##Model
+
+#For using U-Net properly, as it seen below in the architecture, it is always used two convolutions one another after.
+#That's why we will create the class DoubleConv for double convolution.
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConv, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=False),    #Kernel size 3, stride to 1, padding size of 1 which helps to obtain same convolution.
+            nn.BatchNorm2d(out_channels),                                 #input height and width will be same after convolution.
+            nn.ReLU(inplace=True),                                          
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1, bias=False),   #We will copy-paste the first convolution with only difference that
+            nn.BatchNorm2d(out_channels),                                 #changing in_channels, out_channels to out_channels, out_channels
+            nn.ReLU(inplace=True),                                        #For second convolution. And we had bias=False because
+        )                                                                 #we will use Batch Normalization.
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+
+
+## Unet
+
+class UNET(nn.Module):
+    def __init__(
+            self, in_channels=3, out_channels=1, features=[64, 128, 256, 512],  #In Unet paper, out channels are two but we are going to do
+    ):                                                                          #binary image segmentation. So, we can output a single channel.
+        super(UNET, self).__init__()
+        self.ups = nn.ModuleList()
+        self.downs = nn.ModuleList()
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Down part of UNET
+        for feature in features:
+            self.downs.append(DoubleConv(in_channels, feature))                 #We will fill the modulelist created above with features.
+            in_channels = feature                                               #This will create a loop inside of conv layers.
+
+        # Up part of UNET
+        for feature in reversed(features):                                      #It will be the reversed version of features
+            self.ups.append(
+                nn.ConvTranspose2d(
+                    feature*2, feature, kernel_size=2, stride=2,                #We will add the skip connections after, so we need to concenate 
+                )                                                               #For example, it will going to be 512 * 2 = 1024, so it will be the case for all of the transpose elements.
+            )                                                                   #Kernel_size and stride parameters are = 2 so this will double the height of the image.
+            self.ups.append(DoubleConv(feature*2, feature))
+
+        self.bottleneck = DoubleConv(features[-1], features[-1]*2)              #Last in features list is the bottom part of the architecture so with doing features [-1]
+        self.final_conv = nn.Conv2d(features[0], out_channels, kernel_size=1)   #The final conv should not change the height and width of the image. Just change the number of channels.
+
+    def forward(self, x):
+        skip_connections = []                                                   #We will store all of the skip connections in here.
+
+        for down in self.downs:                                                 
+            x = down(x)                                                         
+            skip_connections.append(x)                                          #We add skip connections right before downsampling.
+            x = self.pool(x)
+
+        x = self.bottleneck(x)
+        skip_connections = skip_connections[::-1]                               #First sample has the highest resolution, so we will reverse it.
+
+        for idx in range(0, len(self.ups), 2):                                  #Up, double conv, up, double conv. That's why we have the range here.
+            x = self.ups[idx](x)                                                #Probably, there are better ways to doing this. But I came out with this solution.
+            skip_connection = skip_connections[idx//2]                          #Because of step of 2, we used index / 2 for skip connection.
+
+            if x.shape != skip_connection.shape:
+                x = TF.resize(x, size=skip_connection.shape[2:])
+
+            concat_skip = torch.cat((skip_connection, x), dim=1)                #We upsample, have skip connection and then concetenate.
+            x = self.ups[idx+1](concat_skip)
+
+        return self.final_conv(x)
+
+def test():                                                                     #Max pool will decrease the resolution to 80x80 and the output will be 160x160. That is a problem which
+    x = torch.randn((3, 1, 161, 161))                                           #come from the divided by two of index.
+    model = UNET(in_channels=1, out_channels=1)                                 #That's why we have x.shape != in line 42. It will check whether it can be divided by 2.
+    preds = model(x)
+    assert preds.shape == x.shape
+
+if __name__ == "__main__":
+    test()
+
+
+## Creating Dataset to imply whu dataset
+
+class WhuDataset(Dataset):
+    def __init__(self, image_dir, mask_dir, transform=None):
+        
+        #All necessary information for training from Dataset method
+        #is located here. .tif directory, masked image directory,
+        #transform method
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
+        self.images = os.listdir(mask_dir)
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, index):
+        img_path = os.path.join(self.image_dir, self.images[index].replace("mask.tif", ".tif"))
+        mask_path = os.path.join(self.mask_dir, self.images[index])
+        image = io.imread(img_path)
+        mask = io.imread(mask_path)
+        mask[mask == 255.0] = 1.0
+
+        if self.transform is not None:
+            augmentations = self.transform(image=image, mask=mask)
+            image = augmentations["image"]
+            mask = augmentations["mask"]
+
+        return image, mask
+
+
+
+##Utils
+
+def save_checkpoint(state, filename="/content/drive/MyDrive/Checkpoint_2016/2016.rar"):                   
+    print("=> Saving checkpoint")
+    torch.save(state, filename)
+
+def load_checkpoint(checkpoint, model):
+    print("=> Loading checkpoint")
+    model.load_state_dict(checkpoint["state_dict"])
+
+def get_loaders(
+    train_dir,
+    train_maskdir,
+    val_dir,
+    val_maskdir,
+    batch_size,
+    train_transform,
+    val_transform,
+    num_workers=4,
+    pin_memory=True,
+):
+    train_ds = WhuDataset(                                                 #Specifies everything about the dataset
+        image_dir=train_dir,
+        mask_dir=train_maskdir,
+        transform=train_transform,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        shuffle=True,
+    )
+
+    val_ds = WhuDataset(
+        image_dir=val_dir,
+        mask_dir=val_maskdir,
+        transform=val_transform,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        shuffle=False,
+    )
+
+    return train_loader, val_loader
+
+
+
+def check_accuracy(loader, model, device="cuda"):                               #For semantic segmentation, we need the output for each individual pixel.
+    num_correct = 0
+    num_pixels = 0
+    dice_score = 0
+    model.eval()
+    
+
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device)
+            y = y.to(device).unsqueeze(1)
+            preds = torch.sigmoid(model(x))
+            preds = (preds > 0.5).float()                                       #While implementing this check_accuracy def from some source, it didn't have .float() so I added that.
+            num_correct += (preds == y).sum()
+            num_pixels += torch.numel(preds)
+            dice_score += (2 * (preds * y).sum()) / (                           #Dice score is only for binary evaluation. For multi-class version of this code, this prediction will change.
+                (preds + y).sum() + 1e-8
+            )
+       
+            
+    print(
+        f"Got {num_correct}/{num_pixels} with acc {num_correct/num_pixels*100:.2f}"
+    )
+    print(f"Dice score: {dice_score/len(loader)}")
+    
+    model.train()
+
+
+def save_predictions_as_imgs(
+    loader, model, folder="", device="cuda"
+):
+    model.eval()
+    #try:
+    for idx, (x, y) in enumerate(loader):
+          x = x.to(device=device)
+          with torch.no_grad():
+              preds = torch.sigmoid(model(x))
+              preds = (preds > 0.5).float()
+          torchvision.utils.save_image(
+              preds, f"{folder}/pred_{idx}.png"
+              
+          )
+          torchvision.utils.save_image(y.unsqueeze(1).float(), f"{folder}{idx}.png")
+
+
+##Training
+
+# Hyperparameters etc.
+import torch
+LEARNING_RATE = 1e-4
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BATCH_SIZE = 10 #No of samples sent through the network
+NUM_EPOCHS = 100 #Times the model will be trained
+NUM_WORKERS = 2 #Cores involved in the process
+IMAGE_HEIGHT = 128#650 originally
+IMAGE_WIDTH = 128 #650 originally
+PIN_MEMORY = True
+LOAD_MODEL = False
+import os
+
+
+
+TRAIN_IMG_DIR =r"/content/drive/MyDrive/2016 dataset/2016 train image"
+
+TRAIN_MASK_DIR = r"/content/drive/MyDrive/2016 dataset/2016 train mask"
+
+VAL_IMG_DIR = r"/content/drive/MyDrive/2016 dataset/2016 train image"
+
+VAL_MASK_DIR = r"/content/drive/MyDrive/2016 dataset/2016 train mask"
+
+def train_fn(loader, model, optimizer, loss_fn, scaler):                        #General Structure
+    loop = tqdm(loader)                                                         #tqdm... what a life saver. Observing the process is as much important as the training.
+
+    for batch_idx, (data, targets) in enumerate(loop):
+        data = data.to(device=DEVICE)
+        targets = targets.float().unsqueeze(1).to(device=DEVICE)                #For binary cross entropy loss.
+
+        # forward
+        with torch.cuda.amp.autocast():
+            predictions = model(data)
+            loss = loss_fn(predictions, targets)
+
+        # backward
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        # update tqdm loop
+        loop.set_postfix(loss=loss.item())
+
+def main():
+    
+    train_transform = A.Compose(
+        [
+            A.Resize(height=IMAGE_HEIGHT, width=IMAGE_WIDTH),
+            A.Rotate(limit=35, p=1.0),
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.1),
+            A.Normalize(
+                mean=[0.0, 0.0, 0.0],
+                std=[1.0, 1.0, 1.0],
+                max_pixel_value=255.0,                                          #We need a number between 0-1 so we divide the result to 255.0
+            ),
+            ToTensorV2(),
+        ],
+    )
+
+    val_transforms = A.Compose(
+        [
+            A.Resize(height=IMAGE_HEIGHT, width=IMAGE_WIDTH),
+            A.Normalize(
+                mean=[0.0, 0.0, 0.0],
+                std=[1.0, 1.0, 1.0],
+                max_pixel_value=255.0,
+            ),
+            ToTensorV2(),
+        ],
+    )
+
+    model = UNET(in_channels=3, out_channels=1).to(DEVICE)                      #Our out_channels = 1 just for now. But for the rest of the project, digitization will have apprx. at least 100 classes.
+    loss_fn = nn.BCEWithLogitsLoss()                                            #On our output, we don't have sigmoid function. So I used binary cross entropy with logits loss.
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    train_loader, val_loader = get_loaders(                                     
+        TRAIN_IMG_DIR,
+        TRAIN_MASK_DIR,
+        VAL_IMG_DIR,
+        VAL_MASK_DIR,
+        BATCH_SIZE,
+        train_transform,
+        val_transforms,
+        NUM_WORKERS,
+        PIN_MEMORY,
+    )
+
+    if LOAD_MODEL:
+        load_checkpoint(torch.load("/content/drive/MyDrive/Checkpoint_2016/2016.rar"), model)
+
+    check_accuracy(val_loader, model, device=DEVICE)
+    scaler = torch.cuda.amp.GradScaler()
+
+    for epoch in range(NUM_EPOCHS):
+        train_fn(train_loader, model, optimizer, loss_fn, scaler)               #Let's send everything to train function.
+
+        # save model
+        checkpoint = {
+            "state_dict": model.state_dict(),
+            "optimizer":optimizer.state_dict(),
+        }
+        save_checkpoint(checkpoint)
+
+        # check accuracy
+        check_accuracy(val_loader, model, device=DEVICE)
+
+        # print some examples to a folder
+        save_predictions_as_imgs(
+            val_loader, model, folder="/content/drive/MyDrive/2016 prediction", device=DEVICE
+        )
+
+if __name__ == "__main__":
+    main()
+
+
+
+##Checking image accuracy and showing final output
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+
+
+
+model2 = UNET(in_channels=3, out_channels=1).to(DEVICE)
+
+
+
+load_checkpoint(torch.load("/content/drive/MyDrive/Checkpoint_2016/2016.rar"), model2)
+model2.eval()
+
+loader1 = A.Compose(
+        [
+            A.Resize(height=65, width=65),
+            A.Normalize(
+                mean=[0.0, 0.0, 0.0],
+                std=[1.0, 1.0, 1.0],
+                max_pixel_value=255.0,
+            ),
+            ToTensorV2(),
+        ],
+)
+
+
+def image_loader(image_name):
+    """load image, returns cuda tensor"""
+    image = io.imread(image_name)
+    transform = loader1
+
+
+    augmentations = transform(image=image)
+    image = augmentations["image"]
+
+
+    
+    image = image.unsqueeze(0)  #this is for VGG, may not be needed for ResNet
+    return image.cuda()  #assumes that you're using GPU
+    ##
+##import imageio
+# Load the image file
+##image = imageio.imread('/content/drive/MyDrive/dataset_of_2016/train_whole_of_2016')
+
+# Display the image
+##plt.imshow(image)
+##plt.show()
+
+
+image = image_loader("/content/drive/MyDrive/2016 dataset/2016 test image/0_0.tif")
+
+
+with torch.no_grad():
+              preds = torch.sigmoid(model2(image))
+              preds = (preds > 0.5).float()
+torchvision.utils.save_image(
+              preds, f"/content/drive/MyDrive/2016 prediction/pred_0.png"   ##Add the test whole image path here
+)
+import imageio
+
+import matplotlib.image as mpimg
+# Load the image file
+img = mpimg.imread("/content/drive/MyDrive/2016 prediction/pred_0.png")                        
+##imgplot = plt.imshow(img)
+import matplotlib.pyplot as plt
+
+# Load the ground truth, label extracted, and original image
+ground_truth = plt.imread('/content/drive/MyDrive/2016 dataset/2016 test mask/0_0.tif')
+label_extracted = plt.imread('/content/drive/MyDrive/2016 prediction/pred_0.png')
+original_image = plt.imread('/content/drive/MyDrive/2016 dataset/2016 test image/0_0.tif')
+
+# Create a figure with 3 subplots
+fig, axs = plt.subplots(1, 3, figsize=(10, 10))
+
+
+# Plot the ground truth in the first subplot
+axs[0].imshow(ground_truth)
+axs[0].set_title('Ground Truth')
+
+# Plot the label extracted in the second subplot
+axs[1].imshow(label_extracted)
+axs[1].set_title('Feature extracted')
+# Plot the original image in the third subplot
+axs[2].imshow(original_image)
+axs[2].set_title('Original Image')
+
+
+# Show the figure
+plt.show()
+
+
+
+
+
+
+# First, authenticate and mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Next, import the necessary libraries
+import numpy as np
+from PIL import Image
+import os
+
+# Set the path to the directory where you want to save the label
+save_path = '/content/drive/MyDrive/2016 Mask for cd'
+
+# Create the directory if it does not exist
+if not os.path.exists(save_path):
+    os.makedirs(save_path)
+
+# Replace the following line with code to extract the label from your U-Net
+label = np.array([[1, 0, 1], [0, 1, 0], [1, 0, 1]], dtype=np.uint8)
+
+# Save the label as an image in PNG format
+label_image = Image.fromarray(label)
+label_image.save(os.path.join(save_path, '/content/drive/MyDrive/2016 dataset/Prediction0.png'))
+
+
+
+
+
+
+import torch
+import numpy as np
+from PIL import Image
+
+# Load the feature map
+feature_map = Image.open('/content/drive/MyDrive/2016 dataset/Prediction0.png')
+
+# Convert the feature map to a NumPy array
+feature_array = np.array(feature_map)
+
+# Convert the feature array to a PyTorch tensor
+feature_tensor = torch.from_numpy(feature_array)
+
+# Save the feature tensor as a .pt file
+torch.save(feature_tensor, '/content/drive/MyDrive/2016 dataset/Prediction0.pt')
+
+
+
+
+
+
+
